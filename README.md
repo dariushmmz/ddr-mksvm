@@ -228,6 +228,43 @@ error instead of combining incompatible results.
 Running without `--resume` intentionally starts a fresh experiment and
 replaces checkpoint files for each selected ablation as it is reached.
 
+### Running with a hosted-notebook timeout
+
+Include `--resume` from the first launch so the same command can be used after
+the timeout. Run the archive commands from the repository root so the ZIP
+contains `results/` at its top level:
+
+```bash
+timeout -s SIGTERM -k 1m 340m python main_ddr_binary.py \
+  --dataset mammographicmass_binary \
+  --ablation dnn_dro \
+  --n_runs 96 \
+  --n_jobs 16 \
+  --seeded \
+  --resume
+
+zip -r results.zip results/
+mv results.zip /mnt/mksvm/
+```
+
+On the next notebook instance, clone or update the repository, restore the ZIP
+in the repository root, and repeat the identical training command:
+
+```bash
+cp /mnt/mksvm/results.zip .
+unzip -o results.zip
+python main_ddr_binary.py \
+  --dataset mammographicmass_binary \
+  --ablation dnn_dro \
+  --n_runs 96 \
+  --n_jobs 16 \
+  --seeded \
+  --resume
+```
+
+Exit status `124` from `timeout` means the time limit was reached; it does not
+invalidate atomic checkpoints from runs that finished before termination.
+
 ## Results
 
 DDR-MKSVM outputs are written under:
