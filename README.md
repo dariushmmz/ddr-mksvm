@@ -89,6 +89,22 @@ interruption, repeat the same command with `--resume`; for example:
 python main_ddr_binary.py --dataset mammographicmass_binary --ablation all --resume
 ```
 
+Use `--n_jobs` to cap concurrent workers in hosted notebooks.  For a
+16-vCPU instance, for example:
+
+```bash
+python main_ddr_binary.py --dataset mammographicmass_binary --ablation all --n_jobs 16 --resume
+```
+
+The default worker count is container-quota-aware; unlike joblib's raw
+`n_jobs=-1`, it checks Linux CPU quotas and will not deliberately use every
+CPU visible on the physical host.  If the instance has limited RAM, start
+with `--n_jobs 8` because every worker owns a separate kernel/solver process.
+
+Binary dataset loading converts feature columns to numeric values and
+mean-imputes missing markers such as `?`, printing the affected column counts.
+Invalid/missing labels and entirely empty feature columns remain hard errors.
+
 The input CSV, `--n_runs`, `--seeded` setting, and ablation configuration
 must match the checkpoint.  A command without `--resume` intentionally
 starts fresh and replaces checkpoints for each selected ablation as it is

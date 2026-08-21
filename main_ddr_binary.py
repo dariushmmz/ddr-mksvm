@@ -42,8 +42,9 @@ from ddr_mksvm.checkpointing import (
     file_sha256,
     run_and_checkpoint,
 )
+from ddr_mksvm.runtime import resolve_n_jobs
 from unit_of_work_ddr_binary import unit_of_work_ddr_binary
-from unit_of_work_deterministic_binary import DATASET_CONFIG
+from unit_of_work_deterministic_binary import DATASET_CONFIG, prepare_binary_data
 
 
 ABLATIONS = {
@@ -61,6 +62,7 @@ def theoretical_binomial_std(p_hat, n_test):
 
 def run_one_ablation(DATA, dataset_name, ablation_name, n_runs, n_jobs=-1, seeded=False,
                      checkpoint_dir=None, resume=False, checkpoint_metadata=None):
+    n_jobs = resolve_n_jobs(n_jobs, n_runs)
     flags = ABLATIONS[ablation_name]
     t0 = time.time()
     resumed_runs = 0
@@ -160,6 +162,10 @@ def main():
                          help="Which ablation(s) to run (default: full).")
     parser.add_argument("--n_runs", type=int, default=96,
                          help="Number of independent random splits (default: 96, paper protocol).")
+    parser.add_argument("--n_jobs", type=int, default=None,
+                         help="Concurrent training workers. Default: container/CPU-quota-aware "
+                              "CPU count. Use a smaller value if memory is limited; -1 also uses "
+                              "the quota-aware count.")
     parser.add_argument("--seeded", action="store_true",
                          help="Use run-index seeding (run i always gets the same split as run i "
                               "of any other --seeded script/ablation on this dataset) for a fair, "
@@ -170,6 +176,7 @@ def main():
                               "n_runs, seed mode, and input CSV. Without this flag, checkpoints "
                               "for each selected ablation are restarted.")
     args = parser.parse_args()
+    n_jobs = resolve_n_jobs(args.n_jobs, args.n_runs)
 
     if args.dataset not in DATASET_CONFIG:
         available = ", ".join(sorted(DATASET_CONFIG.keys()))
@@ -185,6 +192,7 @@ def main():
     print(f"Dataset kernel: {config['kernel']}")
     print(f"Ablation(s): {args.ablation}")
     print(f"n_runs: {args.n_runs}")
+    print(f"n_jobs: {n_jobs}")
     print(f"Resume: {args.resume}")
     print("=" * 60)
 
@@ -193,6 +201,10 @@ def main():
 
     DATA = pd.read_csv(csv_filename)
     print(f"Loaded {len(DATA)} rows, {len(DATA.columns)} columns.")
+    DATA, imputed_counts = prepare_binary_data(DATA)
+    if imputed_counts:
+        details = ", ".join(f"{name}={count}" for name, count in imputed_counts.items())
+        print(f"Imputed missing/non-numeric feature values with column means: {details}")
     dataset_sha256 = file_sha256(csv_filename)
 
     results_dir = os.path.join("results", args.dataset, "ddr_mksvm")
@@ -206,7 +218,7 @@ def main():
         for name in ablation_names:
             checkpoint_dir = os.path.join(results_dir, "checkpoints", "binary", name)
             all_results[name] = run_one_ablation(
-                DATA, args.dataset, name, args.n_runs, seeded=args.seeded,
+                DATA, args.dataset, name, args.n_runs, n_jobs=n_jobs, seeded=args.seeded,
                 checkpoint_dir=checkpoint_dir, resume=args.resume,
                 checkpoint_metadata={"dataset_sha256": dataset_sha256},
             )

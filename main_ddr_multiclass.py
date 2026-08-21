@@ -29,6 +29,7 @@ from ddr_mksvm.checkpointing import (
     file_sha256,
     run_and_checkpoint,
 )
+from ddr_mksvm.runtime import resolve_n_jobs
 from unit_of_work_ddr_multiclass import unit_of_work_ddr_multiclass
 from unit_of_work_deterministic_multiclass import DATASET_CONFIG
 
@@ -48,6 +49,7 @@ def theoretical_binomial_std(p_hat, n_test):
 
 def run_one_ablation(DATA, dataset_name, ablation_name, n_runs, n_jobs=-1, seeded=False,
                      checkpoint_dir=None, resume=False, checkpoint_metadata=None):
+    n_jobs = resolve_n_jobs(n_jobs, n_runs)
     flags = ABLATIONS[ablation_name]
     t0 = time.time()
     resumed_runs = 0
@@ -140,6 +142,10 @@ def main():
     parser.add_argument("--ablation", type=str, default="full",
                          choices=list(ABLATIONS.keys()) + ["all"])
     parser.add_argument("--n_runs", type=int, default=96)
+    parser.add_argument("--n_jobs", type=int, default=None,
+                         help="Concurrent training workers. Default: container/CPU-quota-aware "
+                              "CPU count. Use a smaller value if memory is limited; -1 also uses "
+                              "the quota-aware count.")
     parser.add_argument("--seeded", action="store_true",
                          help="Run-index seeding for paired comparisons -- see main_ddr_binary.py.")
     parser.add_argument("--resume", action="store_true",
@@ -147,6 +153,7 @@ def main():
                               "n_runs, seed mode, and input CSV. Without this flag, checkpoints "
                               "for each selected ablation are restarted.")
     args = parser.parse_args()
+    n_jobs = resolve_n_jobs(args.n_jobs, args.n_runs)
 
     if args.dataset not in DATASET_CONFIG:
         available = ", ".join(sorted(DATASET_CONFIG.keys()))
@@ -163,6 +170,7 @@ def main():
     print(f"Classes: {config['classes']}")
     print(f"Ablation(s): {args.ablation}")
     print(f"n_runs: {args.n_runs}")
+    print(f"n_jobs: {n_jobs}")
     print(f"Resume: {args.resume}")
     print("=" * 60)
 
@@ -184,7 +192,7 @@ def main():
         for name in ablation_names:
             checkpoint_dir = os.path.join(results_dir, "checkpoints", "multiclass", name)
             all_results[name] = run_one_ablation(
-                DATA, args.dataset, name, args.n_runs, seeded=args.seeded,
+                DATA, args.dataset, name, args.n_runs, n_jobs=n_jobs, seeded=args.seeded,
                 checkpoint_dir=checkpoint_dir, resume=args.resume,
                 checkpoint_metadata={"dataset_sha256": dataset_sha256},
             )

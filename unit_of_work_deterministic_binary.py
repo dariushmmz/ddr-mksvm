@@ -88,8 +88,61 @@ DATASET_CONFIG = {
 }
 
 
+def prepare_binary_data(DATA):
+    """Coerce binary data to finite numeric values and mean-impute features.
+
+    The raw Mammographic Mass dataset contains missing feature values (often
+    encoded as ``?``).  Keeping all 961 rows therefore requires an explicit
+    missing-value policy before standardization and kernel construction.
+
+    Returns
+    -------
+    clean_data : pandas.DataFrame
+        Numeric data with finite, mean-imputed feature columns.
+    imputed_counts : dict[str, int]
+        Number of missing/non-numeric/non-finite values replaced per feature.
+    """
+    if not isinstance(DATA, pd.DataFrame) or DATA.shape[1] < 2:
+        raise ValueError("DATA must be a DataFrame with feature columns and a final label column")
+
+    feature_names = list(DATA.columns[:-1])
+    label_name = DATA.columns[-1]
+    features = DATA.iloc[:, :-1].apply(pd.to_numeric, errors="coerce")
+    features = features.replace([np.inf, -np.inf], np.nan)
+    missing_counts = features.isna().sum()
+
+    all_missing = [str(name) for name in feature_names if features[name].isna().all()]
+    if all_missing:
+        raise ValueError(
+            "Feature columns contain no usable numeric values: " + ", ".join(all_missing)
+        )
+
+    # Mean imputation is consistent with the existing global standardization:
+    # after centering, an imputed value maps exactly to zero.
+    features = features.fillna(features.mean(axis=0))
+    labels = pd.to_numeric(DATA.iloc[:, -1], errors="coerce")
+    invalid_labels = labels.isna() | ~np.isfinite(labels.to_numpy(dtype=float))
+    if invalid_labels.any():
+        rows = DATA.index[invalid_labels].tolist()[:10]
+        raise ValueError(f"Label column '{label_name}' has missing/non-numeric values at rows {rows}")
+
+    unique_labels = set(labels.astype(float).unique())
+    if unique_labels != {0.0, 1.0}:
+        raise ValueError(
+            f"Binary label column '{label_name}' must contain exactly 0 and 1; "
+            f"found {sorted(unique_labels)}"
+        )
+
+    clean_data = features.copy()
+    clean_data[label_name] = labels.to_numpy(dtype=float)
+    return clean_data, {
+        str(name): int(count) for name, count in missing_counts.items() if count
+    }
+
+
 def _apply_transform(DATA, transform_type):
     """Apply the specified data transformation to feature columns."""
+    DATA, _ = prepare_binary_data(DATA)
     data_array = DATA.values
     feature_cols = data_array[:, :-1].astype(float)
     label_col = data_array[:, -1]
