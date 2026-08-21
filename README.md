@@ -1,177 +1,359 @@
-# DDR-MKSVM — implementation (v2)
+# DDR-MKSVM
 
-Implementation of `DDR-MKSVM_spec.md`, built on top of the corrected,
-fully-parameterized deterministic scripts (`DATASET_CONFIG`,
-`_apply_transform`, `_parse_kernel`, `_compute_kernel`,
-`_compute_kernel_test` in `unit_of_work_deterministic_binary.py` /
-`unit_of_work_deterministic_multiclass.py`). DDR-MKSVM **imports these
-directly rather than re-deriving them**, so it automatically tracks any
-future change to the dataset registry, transforms, or kernel parsing —
-there is exactly one place those live.
+DDR-MKSVM is a Python implementation of a distributionally robust, deep,
+multiple-kernel SVM. It supports binary and multiclass classification,
+four ablation modes, parallel repeated holdout runs, and crash-safe resume
+checkpoints.
 
-## What changed from v1
+The mathematical design is documented in [DDR-MKSVM_spec.md](DDR-MKSVM_spec.md).
+The implementation reuses the deterministic dataset registry, transforms, and
+kernel parsing so the robust and baseline paths stay aligned.
 
-- **Dataset-parameterized**, matching the corrected base scripts: both
-  `unit_of_work_ddr_binary.py` and the new `unit_of_work_ddr_multiclass.py`
-  take a `dataset_name` argument and look up `DATASET_CONFIG` themselves,
-  instead of hardcoding one CSV/kernel.
-- **`ddr_mksvm/config_adapter.py`** (new) bridges the base scripts' kernel
-  string convention (`"hom_linear"`, `"inhom_quadratic"`, `"inhom_cubic"`,
-  `"gaussian_rbf"`, ...) to `ddr_mksvm`'s kernel objects, by calling the
-  base scripts' own `_parse_kernel`/`_compute_kernel` — not reimplementing
-  the parsing. `tests/test_config_adapter.py` checks this numerically for
-  every kernel string in both registries.
-- **`unit_of_work_ddr_multiclass.py`** (new) — the previous version's
-  README flagged multiclass as an unported gap. It's now implemented:
-  one-vs-all over `L` classes, with `f_theta`/`eta` **shared** across all
-  `L` binary subproblems (`AlternatingTrainer.fit_one_vs_all`), matching
-  how the deterministic script already shares one kernel across all `L`
-  subproblems.
-- **`main_ddr_binary.py` / `main_ddr_multiclass.py`** now take
-  `--dataset`/`--ablation`/`--n_runs`, matching the corrected base
-  scripts' CLI, and save to `results/<dataset>/ddr_mksvm/` — same
-  Colab-workflow shape as `running_deterministic_version.py`.
-- The corrected `DATASET_CONFIG` in `unit_of_work_deterministic_multiclass.py`
-  now correctly lists `heart_disease` (5 classes) and `dermatology`
-  (6 classes) as multiclass — matching what the earlier reproduction-report
-  review flagged as the likely-correct reading of the base paper's Table
-  3/5 formatting. No action needed on the DDR-MKSVM side beyond picking
-  this registry up automatically (which it does, by import).
+## Features
 
-## What's here
+- Binary and one-vs-all multiclass training.
+- Dataset-specific preprocessing and kernels.
+- Deep feature learning, multiple-kernel learning, and Wasserstein-DRO modes.
+- The paper protocol of 96 independent 75/25 stratified holdout runs.
+- Atomic per-run checkpoints and interrupted-run recovery.
+- Configurable, container-quota-aware parallel workers.
+- Binary missing-value handling for raw values such as `?` and `NaN`.
+- MATLAB and CSV result exports.
+- Deterministic baseline scripts for comparison with the `legacy` ablation.
 
+## Requirements
+
+- Python 3.10 or newer is recommended.
+- A CPU environment is sufficient. The current implementation does not move
+  PyTorch models or CVXPY solvers to CUDA, so attaching a GPU does not currently
+  accelerate training.
+- Enough memory for the selected worker count. Every worker owns a separate
+  kernel matrix and solver process and may also own a PyTorch model.
+
+The Python packages and supported version ranges are listed in
+[requirements.txt](requirements.txt).
+
+## Installation
+
+Clone the repository and enter its directory:
+
+```bash
+git clone https://github.com/dariushmmz/ddr-mksvm.git
+cd ddr-mksvm
 ```
+
+Create and activate a virtual environment on Linux or macOS:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+On Windows PowerShell:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+Verify the installation:
+
+```bash
+python -m pytest -q
+```
+
+The current test suite has 30 tests covering the mathematical lemmas, solver
+formulations, legacy reduction, checkpoint recovery, preprocessing, and runtime
+worker selection.
+
+### Hosted notebook setup
+
+In Jupyter/Colab-style notebooks, the equivalent setup is:
+
+```python
+!git clone https://github.com/dariushmmz/ddr-mksvm.git
+%cd ddr-mksvm
+!python -m pip install -r requirements.txt
+!python -m pytest -q
+```
+
+Upload the required CSV into `dataset/`, then run the command from the quick
+start section below. Set `--n_jobs` explicitly to the notebook's allocated CPU
+count; if memory is limited, use half that number. A GPU is not used by the
+current implementation.
+
+For long jobs, keep the repository or at least `results/` on persistent
+storage. Checkpoints stored only on an ephemeral notebook filesystem disappear
+when the notebook instance is deleted.
+
+## Dataset setup
+
+Place each CSV directly in `dataset/`. Feature columns must come first and the
+class label must be the final column.
+
+Binary labels must be numeric `0` and `1`. Binary feature columns are converted
+to numeric values; missing, non-numeric, and infinite feature values are
+mean-imputed. The driver prints the number of replacements per affected column.
+Missing labels and entirely empty feature columns are rejected.
+
+Multiclass labels must be integers `1..L`. The final label column is normalized
+internally to the name `CLASS`. Multiclass CSVs must already contain finite
+numeric features and labels.
+
+Only `parkinson.csv` is currently tracked in Git. Supply the other CSVs before
+selecting their dataset names.
+
+### Binary datasets
+
+| `--dataset` value | Expected CSV | Transform | Kernel |
+| --- | --- | --- | --- |
+| `arrhythmia` | `arrhythmia.csv` | none | Gaussian RBF |
+| `parkinson` | `parkinson.csv` | min-max | homogeneous linear |
+| `climate_model_crashes` | `climate_model_crashes.csv` | none | homogeneous linear |
+| `breast_cancer_diagnostic` | `breast_cancer_diagnostic.csv` | min-max | inhomogeneous quadratic |
+| `breast_cancer` | `breast_cancer.csv` | standardization | homogeneous linear |
+| `blood_transfusion` | `blood_transfusion.csv` | standardization | inhomogeneous cubic |
+| `mammographicmass_binary` | `mammographicmass_binary.csv` | standardization | inhomogeneous quadratic |
+| `qsar_biodegradation` | `qsar_biodegradation.csv` | min-max | Gaussian RBF |
+
+### Multiclass datasets
+
+| `--dataset` value | Expected CSV | Classes | Transform | Kernel |
+| --- | --- | ---: | --- | --- |
+| `iris` | `iris_multiclass.csv` | 3 | none | Gaussian RBF |
+| `wine` | `wine.csv` | 3 | standardization | inhomogeneous linear |
+| `heart_disease` | `heart_disease.csv` | 5 | standardization | inhomogeneous linear |
+| `dermatology` | `dermatology.csv` | 6 | none | inhomogeneous quadratic |
+
+The registries in `unit_of_work_deterministic_binary.py` and
+`unit_of_work_deterministic_multiclass.py` are the authoritative source for
+dataset filenames, transforms, kernels, and class counts.
+
+## Quick start
+
+Start with a small smoke test before launching the 96-run protocol:
+
+```bash
+python main_ddr_binary.py \
+  --dataset parkinson \
+  --ablation full \
+  --n_runs 2 \
+  --n_jobs 2 \
+  --seeded \
+  --resume
+```
+
+For the long Mammographic Mass experiment on a 16-vCPU notebook:
+
+```bash
+python main_ddr_binary.py \
+  --dataset mammographicmass_binary \
+  --ablation all \
+  --n_runs 96 \
+  --n_jobs 16 \
+  --resume
+```
+
+If the notebook has limited memory, begin with `--n_jobs 8`. Changing
+`--n_jobs` between interrupted and resumed invocations is safe.
+
+A multiclass example:
+
+```bash
+python main_ddr_multiclass.py \
+  --dataset iris \
+  --ablation all \
+  --n_runs 96 \
+  --n_jobs 8 \
+  --resume
+```
+
+Use `python main_ddr_binary.py --help` or
+`python main_ddr_multiclass.py --help` to see the current CLI.
+
+## Ablation modes
+
+| Mode | Deep features | Multiple kernels | DRO penalty | Purpose |
+| --- | ---: | ---: | ---: | --- |
+| `legacy` | off | off | off | Deterministic q=1 baseline/reduction check |
+| `dro_only` | off | off | on | Fixed dataset kernel with Wasserstein-DRO |
+| `dnn_dro` | on | off | on | Learned representation with one kernel and DRO |
+| `full` | on | on | on | Full DDR-MKSVM with the dataset kernel plus an RBF kernel |
+| `all` | — | — | — | Runs `legacy`, `dro_only`, `dnn_dro`, then `full` |
+
+## Command-line options
+
+| Option | Meaning |
+| --- | --- |
+| `--dataset NAME` | Dataset registry key. Binary defaults to `mammographicmass_binary`; multiclass defaults to `iris`. |
+| `--ablation MODE` | One ablation or `all`. Defaults to `full`. |
+| `--n_runs N` | Number of independent stratified holdout runs. Defaults to 96. |
+| `--n_jobs N` | Concurrent workers. The default and `-1` use the detected CPU/container quota. |
+| `--seeded` | Uses run index `i` as the split and model seed, enabling paired comparisons across ablations. |
+| `--resume` | Loads compatible completed-run checkpoints and executes only unfinished runs. |
+
+Without `--seeded`, the first invocation creates and stores an independent
+random seed for every run. Those seeds are reused by `--resume`, but are not
+shared between ablations. With `--seeded`, run `i` uses the same split and
+network initialization across scripts and ablations, which is useful for
+paired comparisons.
+
+## Resume and checkpoint behavior
+
+Use `--resume` even on the first invocation of a long experiment. If no
+manifest exists, it creates one and starts normally. Each worker atomically
+saves its result immediately after completing one random split.
+
+If training is interrupted, repeat the same command:
+
+```bash
+python main_ddr_binary.py --dataset mammographicmass_binary --ablation all --n_runs 96 --n_jobs 16 --resume
+```
+
+Completed runs are loaded and only pending runs are scheduled. Work that was
+still in flight at interruption is repeated. Resume requires the same:
+
+- dataset name and unchanged input CSV contents;
+- ablation configuration;
+- `--n_runs` value;
+- `--seeded` setting.
+
+The worker count may change. A configuration mismatch produces an explicit
+error instead of combining incompatible results.
+
+Running without `--resume` intentionally starts a fresh experiment and
+replaces checkpoint files for each selected ablation as it is reached.
+
+## Results
+
+DDR-MKSVM outputs are written under:
+
+```text
+results/<dataset>/ddr_mksvm/
+```
+
+For binary experiments:
+
+```text
+ddr_mksvm_results.mat
+ddr_mksvm_summary.csv
+checkpoints/binary/<ablation>/manifest.json
+checkpoints/binary/<ablation>/run_00000.npz
+...
+```
+
+For multiclass experiments:
+
+```text
+ddr_mksvm_multiclass_results.mat
+ddr_mksvm_multiclass_summary.csv
+checkpoints/multiclass/<ablation>/manifest.json
+checkpoints/multiclass/<ablation>/run_00000.npz
+...
+```
+
+Aggregate `.mat` and summary CSV files are refreshed after each completed
+ablation. This preserves visible results from early ablations if a later one
+is interrupted. The `results/` directory is ignored by Git.
+
+## Running the deterministic baselines
+
+Use the baseline scripts to compare against the `legacy` ablation:
+
+```bash
+python main_deterministic_binary.py --dataset parkinson --n_runs 96 --seeded
+python main_deterministic_multiclass.py --dataset iris --n_runs 96 --seeded
+```
+
+The deterministic drivers predate the DDR checkpoint manager: they do not
+support `--resume` or `--n_jobs` and currently use all CPUs visible to joblib.
+The DDR drivers are recommended for long ablation runs.
+
+## Project structure
+
+```text
 ddr_mksvm/
-  config_adapter.py             NEW: bridges DATASET_CONFIG kernel strings
-                                 to ddr_mksvm kernel specs, via the base
-                                 scripts' own _parse_kernel/_compute_kernel.
-  kernels/base_kernels.py       Linear / Polynomial / Gaussian-RBF kernels
-                                 with analytic Lipschitz bounds (Lemmas 3-4).
-  kernels/deep_kernel.py        f_theta (Definition 3) + Identity fallback.
-  kernels/mkl_combination.py    eta on the simplex via softmax (Lemma 1).
-  lipschitz/analytic_bounds.py  Lemma 2 (spectral-norm product), Lemma 5.
-  lipschitz/empirical_estimator.py  Diagnostic-only empirical Lipschitz estimate.
-  dro/wasserstein_risk.py       Theorem 1's closed-form DRO risk.
-  optim/convex_subproblem.py    Corollary 1's q=2 SOCP plus explicit legacy q=1 LP.
-  optim/alternating_trainer.py  fit() for binary, fit_one_vs_all() for multiclass.
-  legacy_reduction/base_paper_mode.py  Standalone Proposition 4.8 check.
+  checkpointing.py              atomic per-run checkpoints and manifests
+  config_adapter.py             dataset-kernel configuration bridge
+  runtime.py                    CPU affinity/quota-aware worker selection
+  dro/wasserstein_risk.py       closed-form Wasserstein-DRO risk
+  kernels/base_kernels.py       linear, polynomial, and RBF kernels
+  kernels/deep_kernel.py        learned and identity feature extractors
+  kernels/mkl_combination.py    simplex-constrained kernel mixture
+  lipschitz/                    analytic and empirical Lipschitz tools
+  optim/alternating_trainer.py  binary and one-vs-all alternating training
+  optim/convex_subproblem.py    q=2 SOCP and legacy q=1 LP
 
-unit_of_work_ddr_binary.py      dataset_name-parameterized, binary.
-unit_of_work_ddr_multiclass.py  NEW: dataset_name-parameterized, multiclass.
-main_ddr_binary.py              --dataset/--ablation/--n_runs CLI, binary.
-main_ddr_multiclass.py          NEW: same CLI, multiclass.
-
-tests/                          Maps 1:1 to Part I's lemmas/theorem, plus
-                                 test_config_adapter.py for the new bridge.
+main_ddr_binary.py              binary DDR-MKSVM CLI
+main_ddr_multiclass.py          multiclass DDR-MKSVM CLI
+unit_of_work_ddr_binary.py      one binary holdout run
+unit_of_work_ddr_multiclass.py  one multiclass holdout run
+main_deterministic_*.py         deterministic comparison CLIs
+unit_of_work_deterministic_*.py shared registries, transforms, and kernels
+tests/                          mathematical, solver, resume, and data tests
+dataset/                        input CSV files
+results/                        generated outputs; ignored by Git
 ```
 
-## Install & run
+## Troubleshooting
 
-```bash
-pip install -r requirements.txt
-pytest tests/ -v
+### `ValueError: K/y contain NaN or Inf`
 
-# Binary (matches main_deterministic_binary.py's dataset/ csv convention):
-python main_ddr_binary.py --dataset mammographicmass_binary --ablation full
-python main_ddr_binary.py --dataset parkinson --ablation all --n_runs 96
+Pull the current version. Binary drivers now coerce and mean-impute invalid
+feature values before standardization. The startup log lists affected columns.
+For multiclass data, clean or impute the CSV first. Invalid labels and columns
+with no usable values must be corrected in the source CSV.
 
-# Multiclass:
-python main_ddr_multiclass.py --dataset iris --ablation full
-python main_ddr_multiclass.py --dataset heart_disease --ablation dro_only
-python main_ddr_multiclass.py --dataset dermatology --ablation all
-```
+### `optimal_inaccurate` or `solver violated xi >= 0`
 
-Long DDR-MKSVM runs write one atomic checkpoint per completed random
-split under `results/<dataset>/ddr_mksvm/checkpoints/`.  After an
-interruption, repeat the same command with `--resume`; for example:
+`optimal_inaccurate` is a CVXPY fallback status that can occur for an
+ill-conditioned learned Gram matrix during `dnn_dro` or `full`. The current
+solver reconstructs the minimum feasible slack directly from the returned
+margin, so a finite inaccurate candidate no longer terminates every parallel
+run because of a small negative `xi`. Pull the latest code and repeat the same
+training command with `--resume`; the unfinished split will be retried while
+completed checkpoints are retained.
 
-```bash
-python main_ddr_binary.py --dataset mammographicmass_binary --ablation all --resume
-```
+The warning can still appear and records that the preferred solver did not
+produce a clean `optimal` status. Occasional warnings are recoverable; frequent
+warnings indicate numerical conditioning problems and should be considered
+when interpreting the affected run.
 
-Use `--n_jobs` to cap concurrent workers in hosted notebooks.  For a
-16-vCPU instance, for example:
+### Joblib starts more workers than the notebook CPU allocation
 
-```bash
-python main_ddr_binary.py --dataset mammographicmass_binary --ablation all --n_jobs 16 --resume
-```
+Set the limit explicitly, for example `--n_jobs 16`. The current default also
+checks Linux cgroup quotas, but an explicit value is best on hosted platforms
+that expose the physical host's CPU count.
 
-The default worker count is container-quota-aware; unlike joblib's raw
-`n_jobs=-1`, it checks Linux CPU quotas and will not deliberately use every
-CPU visible on the physical host.  If the instance has limited RAM, start
-with `--n_jobs 8` because every worker owns a separate kernel/solver process.
+### The process is killed or the notebook runs out of memory
 
-Binary dataset loading converts feature columns to numeric values and
-mean-imputes missing markers such as `?`, printing the affected column counts.
-Invalid/missing labels and entirely empty feature columns remain hard errors.
+Reduce the worker count, for example from `--n_jobs 16` to `--n_jobs 8` or
+`--n_jobs 4`, then repeat the same command with `--resume`.
 
-The input CSV, `--n_runs`, `--seeded` setting, and ablation configuration
-must match the checkpoint.  A command without `--resume` intentionally
-starts fresh and replaces checkpoints for each selected ablation as it is
-reached.  Completed checkpoint files are retained after a successful run,
-so the same `--resume` command can also regenerate aggregate `.mat`/`.csv`
-outputs without retraining.
+### Checkpoint configuration does not match
 
-Available `--dataset` values come directly from each script's
-`DATASET_CONFIG` (`unit_of_work_deterministic_binary.py` /
-`unit_of_work_deterministic_multiclass.py`), printed if you pass an
-unknown name.
+Use the same CSV, `--n_runs`, `--seeded`, dataset, and ablation settings as the
+original run. If a fresh experiment is intended, omit `--resume`; this replaces
+the selected ablation's old checkpoints.
 
-## What was validated in this environment, and what wasn't
+### Dataset CSV not found
 
-Still **no internet access** in this sandbox, so `cvxpy`/`torch`/`scikit-learn`
-couldn't be installed here (your environment already has them — your
-uploaded scripts import all three). What *was* run and passed here using
-only `numpy` (already present):
+Check the dataset table above, place the file under `dataset/`, and make sure
+its filename exactly matches the registry entry.
 
-- **`tests/test_lemma1_psd.py`**, **`tests/test_lemma3_rbf_lipschitz.py`**,
-  **`tests/test_theorem1_duality.py`** — 7/7 passed, unchanged from v1.
-- **`tests/test_config_adapter.py`'s actual logic** — manually cross-checked
-  in the sandbox by reimplementing `_parse_kernel`/`_compute_kernel`
-  locally (since importing the real module needs `cvxpy`) and comparing
-  against `kernel_spec_from_config` for all five kernel strings that
-  appear in the two registries (`hom_linear`, `inhom_linear`,
-  `inhom_quadratic`, `inhom_cubic`, `gaussian_rbf`) — all five matched to
-  `1e-8`. The actual test file imports the real modules and will re-run
-  this properly once `cvxpy` is installed.
+## Known limitations
 
-**Not executed here** (run these first in your environment):
-
-- `tests/test_lemma2_spectral_bound.py` (needs `torch`)
-- `tests/test_reduction_to_base_paper.py` (needs `cvxpy`) — the numeric
-  proof of Proposition 4.8 at the LP level.
-- `tests/test_config_adapter.py` (needs `cvxpy`) — the numeric proof that
-  DDR-MKSVM's legacy path uses byte-identical kernels to the deterministic
-  baseline, for every dataset in both registries, not just one hand-picked
-  case.
-- End-to-end runs of `main_ddr_binary.py` / `main_ddr_multiclass.py`
-  against real dataset CSVs (none were uploaded to this conversation —
-  place them under `dataset/` per `running_deterministic_version.py`'s
-  convention, e.g. via the same `ucimlrepo` fetch shown there).
-
-**Action item before using this in anger:** run
-`pytest tests/test_reduction_to_base_paper.py tests/test_config_adapter.py -v`
-first. If either fails, don't trust the `legacy` ablation to actually
-equal `unit_of_work_deterministic_binary.py`/`_multiclass.py`'s numbers,
-and stop before running `--ablation all` — that would just compound the
-discrepancy across every dataset and ablation.
-
-## Known simplifications relative to the spec (unchanged from v1)
-
-- `AlternatingTrainer` uses fixed `n_outer`/`n_inner` iteration counts
-  rather than a convergence-based stopping rule.
-- The polynomial kernel's Lipschitz bound (Lemma 4) uses the simpler of
-  two derivations named in the spec's remark — valid but not the
-  tightest possible, making `epsilon`'s penalty more conservative than
-  necessary for polynomial kernels. Doesn't affect Theorem 1's
-  correctness, only classifier tightness.
-- Testing-phase kernel evaluation for the DNN/MKL path recomputes each
-  base kernel per test batch rather than caching `f_theta`'s forward
-  pass — fine at the dataset sizes here (m up to ~1055), would need
-  batching for larger data.
-- `fit_one_vs_all`'s shared representation is a design choice, not
-  something the spec mandates explicitly — an alternative (independent
-  `f_theta` per class) is more expensive and wasn't implemented; worth
-  an ablation if per-class errors diverge a lot in practice (e.g. the
-  Parkinson-style class-imbalance pathology from the earlier
-  reproduction report).
+- Training uses fixed `n_outer=6` and `n_inner=15` iteration counts instead of
+  a convergence-based stopping rule.
+- Resume granularity is one completed random split, not an inner/outer neural
+  optimization iteration. An interrupted in-flight split is recomputed.
+- PyTorch and CVXPY currently run on CPU; CUDA execution is not implemented.
+- The polynomial-kernel Lipschitz bound is valid but conservative.
+- DNN/MKL test evaluation recomputes base kernels instead of batching/caching
+  for very large datasets.
+- Multiclass training shares one learned representation and kernel mixture
+  across all one-vs-all classifiers.

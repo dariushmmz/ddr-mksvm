@@ -1,0 +1,13 @@
+name,uci_id,output_file,status,rows,columns,error_type,error
+arrhythmia,5,dataset/arrhythmia.csv,failed,,,DatasetNotFoundError,"""Arrhythmia"" dataset (id=5) exists in the repository, but is not available for import. Please select a dataset from this list: https://archive.ics.uci.edu/datasets?skip=0&take=10&sort=desc&orderBy=NumHits&search=&Python=true"
+parkinson,174,dataset/parkinson.csv,downloaded,195.0,23.0,,
+climate_model_crashes,252,dataset/climate_model_crashes.csv,failed,,,DatasetNotFoundError,"""Climate Model Simulation Crashes"" dataset (id=252) exists in the repository, but is not available for import. Please select a dataset from this list: https://archive.ics.uci.edu/datasets?skip=0&take=10&sort=desc&orderBy=NumHits&search=&Python=true"
+breast_cancer_diagnostic,17,dataset/breast_cancer_diagnostic.csv,downloaded,569.0,31.0,,
+breast_cancer,14,dataset/breast_cancer.csv,downloaded,286.0,10.0,,
+blood_transfusion,176,dataset/blood_transfusion.csv,downloaded,748.0,5.0,,
+mammographicmass_binary,161,dataset/mammographicmass_binary.csv,already_exists,830.0,6.0,,
+qsar_biodegradation,254,dataset/qsar_biodegradation.csv,failed,,,DatasetNotFoundError,"""QSAR biodegradation"" dataset (id=254) exists in the repository, but is not available for import. Please select a dataset from this list: https://archive.ics.uci.edu/datasets?skip=0&take=10&sort=desc&orderBy=NumHits&search=&Python=true"
+iris,53,dataset/iris_multiclass.csv,downloaded,150.0,5.0,,
+wine,109,dataset/wine.csv,downloaded,178.0,14.0,,
+heart_disease,45,dataset/heart_disease.csv,downloaded,303.0,14.0,,
+dermatology,33,dataset/dermatology.csv,downloaded,366.0,35.0,,

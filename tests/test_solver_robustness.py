@@ -22,6 +22,7 @@ from ddr_mksvm.optim.convex_subproblem import (
     _LP_SOLVER_CHAIN,
     _SOCP_SOLVER_CHAIN,
 )
+import ddr_mksvm.optim.convex_subproblem as convex_subproblem
 
 
 def test_highs_excluded_from_socp_chain():
@@ -48,3 +49,30 @@ def test_dro_enabled_small_problem_reaches_optimal():
         f"expected a clean 'optimal' status on an easy, well-conditioned SOCP, got {sol['status']!r} "
         "-- the fallback-past-optimal_inaccurate fix may not be working as intended."
     )
+
+
+def test_inaccurate_negative_slack_is_reconstructed_from_margin(monkeypatch):
+    """A finite inaccurate solution must not kill every parallel run."""
+    y = np.array([-1.0, -1.0, 1.0, 1.0])
+    K = np.eye(4)
+
+    def inaccurate_result(*args, **kwargs):
+        return {
+            "status": "optimal_inaccurate",
+            "solver_name": "synthetic",
+            "num_iters": 100,
+            "solve_time": 0.01,
+            "primal_objective": -0.25,
+            "u": np.zeros(4),
+            "gamma": 0.0,
+            "xi": np.full(4, -0.25),
+        }
+
+    monkeypatch.setattr(convex_subproblem, "_solve_with_fallback", inaccurate_result)
+    sol = solve_svm_dro(K, y, nu=0.1, epsilon=0.01, L_theta_eta=1.0)
+
+    np.testing.assert_allclose(sol["xi"], np.ones(4))
+    assert sol["raw_xi_min"] == pytest.approx(-0.25)
+    assert sol["xi_repair_max"] == pytest.approx(1.25)
+    margins = np.outer(y, y) * K @ sol["u"] - y * sol["gamma"] + sol["xi"]
+    assert np.min(margins) >= 1.0 - 1e-12

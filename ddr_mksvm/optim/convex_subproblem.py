@@ -109,8 +109,9 @@ def solve_svm_dro(K,y,nu,epsilon=0.,L_theta_eta=0.,formulation="ddr_q2"):
     problem=cp.Problem(cp.Minimize(obj),constraints)
     r=_solve_with_fallback(problem,dict(u=u,gamma=gamma,xi=xi),socp)
     if r is None:return None
-    if not np.isfinite(r["u"]).all() or not np.isfinite(r["xi"]).all(): raise RuntimeError("non-finite solver variables")
-    if np.min(r["xi"]) < -1e-5: raise RuntimeError("solver violated xi >= 0")
+    if (not np.isfinite(r["u"]).all() or not np.isfinite(r["xi"]).all() or
+            not np.isfinite(r["gamma"])):
+        raise RuntimeError("non-finite solver variables")
     u_value = np.asarray(r["u"], float)
     if formulation == "ddr_q2":
         # Kernel coefficients are non-unique when K is rank deficient. Remove
@@ -119,10 +120,26 @@ def solve_svm_dro(K,y,nu,epsilon=0.,L_theta_eta=0.,formulation="ddr_q2"):
         vals, vecs = np.linalg.eigh(M)
         keep = vals > max(1.0, float(vals.max())) * 1e-10
         u_value = vecs[:, keep] @ (vecs[:, keep].T @ u_value)
-    b=_line_search_b(M,u_value,y,r["gamma"],r["xi"])
-    sol=dict(u=u_value,gamma=r["gamma"],b=b,xi=r["xi"],status=r["status"],
+
+    # xi is separable and has a positive objective coefficient, so for fixed
+    # (u, gamma) its exact optimum is the smallest feasible slack below. Cone
+    # solvers -- especially an SCS ``optimal_inaccurate`` fallback on a poorly
+    # conditioned learned Gram matrix -- can return slightly negative xi and
+    # previously aborted an entire parallel ablation. Reconstructing xi from
+    # the margin is both exactly feasible and objective-improving for the
+    # returned (u, gamma); it is safer than clipping negative entries alone,
+    # which would not repair violated margin constraints.
+    gamma_value = float(r["gamma"])
+    raw_xi = np.asarray(r["xi"], dtype=float)
+    xi_value = np.maximum(0.0, 1.0 - (M @ u_value - y * gamma_value))
+    xi_repair = np.abs(xi_value - raw_xi)
+
+    b=_line_search_b(M,u_value,y,gamma_value,xi_value)
+    sol=dict(u=u_value,gamma=gamma_value,b=b,xi=xi_value,status=r["status"],
              solver_name=r["solver_name"],num_iters=r["num_iters"],solve_time=r["solve_time"],
              primal_objective=r["primal_objective"],used_dro=use_dro,formulation=formulation)
+    sol["raw_xi_min"] = float(raw_xi.min())
+    sol["xi_repair_max"] = float(xi_repair.max())
     sol["diagnostics"]=solution_diagnostics(K,y,sol,nu,epsilon,L_theta_eta,formulation)
     sol["training_error"]=sol["diagnostics"]["training_error"]
     return sol
