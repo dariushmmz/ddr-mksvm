@@ -31,6 +31,7 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 import argparse
+import json
 import time
 import numpy as np
 import pandas as pd
@@ -153,6 +154,59 @@ def save_aggregate_results(results_dir, dataset_name, all_results):
     return summary
 
 
+def load_ablation_from_checkpoints(DATA, dataset_name, ablation_name,
+                                   checkpoint_dir, dataset_sha256):
+    """Load one complete ablation using the configuration stored in its manifest."""
+    manifest_path = os.path.join(checkpoint_dir, "manifest.json")
+    if not os.path.exists(manifest_path):
+        raise FileNotFoundError(
+            f"No checkpoint manifest found for '{ablation_name}': {manifest_path}"
+        )
+
+    with open(manifest_path, "r", encoding="utf-8") as stream:
+        manifest = json.load(stream)
+
+    n_runs = manifest.get("n_runs")
+    seeded = manifest.get("seeded")
+    if not isinstance(n_runs, int) or n_runs <= 0 or not isinstance(seeded, bool):
+        raise ValueError(f"Invalid checkpoint manifest: {manifest_path}")
+
+    metadata = {
+        "kind": "binary",
+        "dataset": dataset_name,
+        "ablation": ablation_name,
+        "flags": ABLATIONS[ablation_name],
+        "dataset_sha256": dataset_sha256,
+    }
+    store = RunCheckpointStore(
+        checkpoint_dir, metadata, n_runs=n_runs, seeded=seeded,
+        value_count=3, resume=True,
+    )
+    completed = store.load_completed()
+    missing = [i for i in range(n_runs) if i not in completed]
+    if missing:
+        preview = ", ".join(map(str, missing[:10]))
+        suffix = "..." if len(missing) > 10 else ""
+        raise ValueError(
+            f"Checkpoint '{ablation_name}' is incomplete: {len(missing)}/{n_runs} "
+            f"runs missing or invalid ({preview}{suffix}). Resume that ablation first."
+        )
+
+    results = [completed[i] for i in range(n_runs)]
+    testing_error = np.array([r[0] for r in results])
+    mean_all = float(testing_error.mean())
+    n_test = int(round(len(DATA) * 0.25))
+    return dict(
+        mean=mean_all,
+        std_empirical=float(testing_error.std(ddof=0)),
+        std_theoretical=theoretical_binomial_std(mean_all, n_test),
+        testing_error=testing_error,
+        testing_error_A=np.array([r[1] for r in results]),
+        testing_error_B=np.array([r[2] for r in results]),
+        elapsed=np.nan,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="DDR-MKSVM binary classification for any dataset from the paper.")
     parser.add_argument("--dataset", type=str, default="mammographicmass_binary",
@@ -175,6 +229,10 @@ def main():
                          help="Continue from per-run checkpoints for the same dataset, ablation, "
                               "n_runs, seed mode, and input CSV. Without this flag, checkpoints "
                               "for each selected ablation are restarted.")
+    parser.add_argument("--summary-only", action="store_true",
+                         help="Do not train. Load complete checkpoints for the selected "
+                              "ablation(s), using each manifest's own n_runs and seed mode, "
+                              "then rebuild the aggregate CSV and MAT files.")
     args = parser.parse_args()
     n_jobs = resolve_n_jobs(args.n_jobs, args.n_runs)
 
@@ -214,6 +272,19 @@ def main():
     ablation_names = list(ABLATIONS.keys()) if args.ablation == "all" else [args.ablation]
 
     all_results = {}
+    if args.summary_only:
+        for name in ablation_names:
+            checkpoint_dir = os.path.join(results_dir, "checkpoints", "binary", name)
+            all_results[name] = load_ablation_from_checkpoints(
+                DATA, args.dataset, name, checkpoint_dir, dataset_sha256
+            )
+            print(f"Loaded complete checkpoint: {name} "
+                  f"({len(all_results[name]['testing_error'])} runs)")
+        summary = save_aggregate_results(results_dir, args.dataset, all_results)
+        print(f"\nSummary rebuilt successfully in {results_dir}/")
+        print(summary.to_string(index=False))
+        return
+
     try:
         for name in ablation_names:
             checkpoint_dir = os.path.join(results_dir, "checkpoints", "binary", name)

@@ -8,6 +8,7 @@ from ddr_mksvm.checkpointing import (
     run_and_checkpoint,
     save_run_checkpoint,
 )
+from main_ddr_binary import ABLATIONS, load_ablation_from_checkpoints
 
 
 def _fake_work(data, seed, offset):
@@ -76,3 +77,45 @@ def test_fresh_store_removes_old_run_files(tmp_path):
     assert not fresh.run_path(0).exists()
     with fresh.manifest_path.open(encoding="utf-8") as stream:
         assert json.load(stream)["seeds"] == [0]
+
+
+def test_summary_loader_uses_seed_mode_and_run_count_from_manifest(tmp_path):
+    metadata = {
+        "kind": "binary",
+        "dataset": "sample",
+        "ablation": "full",
+        "flags": ABLATIONS["full"],
+        "dataset_sha256": "abc123",
+    }
+    store = RunCheckpointStore(
+        tmp_path, metadata, n_runs=2, seeded=True, value_count=3
+    )
+    save_run_checkpoint(store.run_path(0), 0, 0, [0.25, 0.1, 0.2])
+    save_run_checkpoint(store.run_path(1), 1, 1, [0.75, 0.3, 0.4])
+
+    result = load_ablation_from_checkpoints(
+        list(range(8)), "sample", "full", tmp_path, "abc123"
+    )
+
+    assert result["mean"] == pytest.approx(0.5)
+    assert result["std_empirical"] == pytest.approx(0.25)
+    np.testing.assert_allclose(result["testing_error_A"], [0.1, 0.3])
+
+
+def test_summary_loader_rejects_incomplete_checkpoint(tmp_path):
+    metadata = {
+        "kind": "binary",
+        "dataset": "sample",
+        "ablation": "dro_only",
+        "flags": ABLATIONS["dro_only"],
+        "dataset_sha256": "abc123",
+    }
+    store = RunCheckpointStore(
+        tmp_path, metadata, n_runs=2, seeded=False, value_count=3
+    )
+    save_run_checkpoint(store.run_path(0), 0, store.seeds[0], [0.2, 0.1, 0.1])
+
+    with pytest.raises(ValueError, match="incomplete"):
+        load_ablation_from_checkpoints(
+            list(range(8)), "sample", "dro_only", tmp_path, "abc123"
+        )

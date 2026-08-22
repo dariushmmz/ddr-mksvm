@@ -297,6 +297,18 @@ Aggregate `.mat` and summary CSV files are refreshed after each completed
 ablation. This preserves visible results from early ablations if a later one
 is interrupted. The `results/` directory is ignored by Git.
 
+If all binary ablations were trained separately, rebuild the final summary
+without running any model again:
+
+```bash
+python main_ddr_binary.py --dataset mammographicmass_binary --ablation all --summary-only
+```
+
+This mode reads `n_runs` and the seeded/unseeded setting independently from
+each ablation manifest. Every selected checkpoint must be complete and belong
+to the current dataset CSV. Because elapsed training time is not stored in
+per-run checkpoints, `elapsed_s` is empty in the rebuilt summary.
+
 ## Running the deterministic baselines
 
 Use the baseline scripts to compare against the `legacy` ablation:
