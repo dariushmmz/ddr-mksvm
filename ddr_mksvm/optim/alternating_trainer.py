@@ -56,6 +56,28 @@ def _torch_gram(spec, Z):
     raise ValueError(f"unknown kernel kind: {spec['kind']}")
 
 
+def _numpy_gram(spec, Z):
+    """Build an evaluation Gram matrix with double-precision accumulation.
+
+    Torch features are float32 during gradient training.  Passing their NumPy
+    view directly to ``Z.T @ Z`` also performs the reduction in float32.  For
+    large, low-rank Gram matrices (notably blood_transfusion's cubic kernel),
+    that round-off can create negative eigenvalues large enough to look like a
+    genuinely indefinite kernel.  Casting before the reduction preserves the
+    mathematically PSD kernel without changing the learned features.
+    """
+    Z = np.asarray(Z, dtype=np.float64)
+    if spec["kind"] == "linear":
+        return Z.T @ Z
+    if spec["kind"] == "poly":
+        return (Z.T @ Z + spec["c"]) ** spec["degree"]
+    if spec["kind"] == "rbf":
+        diff = Z[:, :, None] - Z[:, None, :]
+        sqdist = np.sum(diff ** 2, axis=0, dtype=np.float64)
+        return np.exp(-sqdist / (2 * spec["alpha"] ** 2))
+    raise ValueError(f"unknown kernel kind: {spec['kind']}")
+
+
 class AlternatingTrainer:
     """
     X_np passed to fit() must be (n, m) -- features as COLUMNS, matching
@@ -106,19 +128,8 @@ class AlternatingTrainer:
         with torch.no_grad():
             Xt = torch.tensor(X_np, dtype=torch.float32)
             Z = self.f_theta(Xt.T).T if self.dnn_on else Xt  # keep (n_feat, m) layout
-            Z_np = Z.detach().numpy()
-        grams = []
-        for spec in self.base_kernel_specs:
-            if spec["kind"] == "linear":
-                grams.append(Z_np.T @ Z_np)
-            elif spec["kind"] == "poly":
-                grams.append((Z_np.T @ Z_np + spec["c"]) ** spec["degree"])
-            elif spec["kind"] == "rbf":
-                diff = Z_np[:, :, None] - Z_np[:, None, :]
-                sqdist = np.sum(diff ** 2, axis=0)
-                grams.append(np.exp(-sqdist / (2 * spec["alpha"] ** 2)))
-            else:
-                raise ValueError(spec["kind"])
+            Z_np = Z.detach().cpu().numpy()
+        grams = [_numpy_gram(spec, Z_np) for spec in self.base_kernel_specs]
         eta = self._eta_numpy()
         K = sum(w * G for w, G in zip(eta, grams))
         return K

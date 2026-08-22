@@ -23,6 +23,7 @@ from ddr_mksvm.optim.convex_subproblem import (
     _SOCP_SOLVER_CHAIN,
 )
 import ddr_mksvm.optim.convex_subproblem as convex_subproblem
+from ddr_mksvm.optim.alternating_trainer import _numpy_gram
 
 
 def test_highs_excluded_from_socp_chain():
@@ -76,3 +77,17 @@ def test_inaccurate_negative_slack_is_reconstructed_from_margin(monkeypatch):
     assert sol["xi_repair_max"] == pytest.approx(1.25)
     margins = np.outer(y, y) * K @ sol["u"] - y * sol["gamma"] + sol["xi"]
     assert np.min(margins) >= 1.0 - 1e-12
+
+
+def test_learned_cubic_gram_is_accumulated_in_float64_and_remains_psd():
+    # Mimics float32 features emitted by the DNN for the 561-point blood
+    # transfusion training split.  The Gram builder must promote before its
+    # reductions, not after float32 round-off has already occurred.
+    rng = np.random.default_rng(45)
+    Z = rng.normal(scale=0.25, size=(4, 561)).astype(np.float32)
+
+    K = _numpy_gram({"kind": "poly", "degree": 3, "c": 1.0}, Z)
+
+    assert K.dtype == np.float64
+    scale = max(1.0, float(np.abs(K).max()))
+    assert np.linalg.eigvalsh(K).min() >= -1e-10 * scale

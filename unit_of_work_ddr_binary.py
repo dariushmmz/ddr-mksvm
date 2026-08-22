@@ -159,6 +159,13 @@ def unit_of_work_ddr_binary(DATA, dataset_name="mammographicmass_binary",
             ZAtest = f(torch.tensor(Atest, dtype=torch.float32).T).T.numpy() if dnn_on else Atest
             ZBtest = f(torch.tensor(Btest, dtype=torch.float32).T).T.numpy() if dnn_on else Btest
 
+        # Match AlternatingTrainer's double-precision kernel accumulation.
+        # The learned features remain float32; only large dot-product sums are
+        # promoted to avoid spurious non-PSD training/test kernels.
+        Zdati = np.asarray(Zdati, dtype=np.float64)
+        ZAtest = np.asarray(ZAtest, dtype=np.float64)
+        ZBtest = np.asarray(ZBtest, dtype=np.float64)
+
         eta = trainer._eta_numpy()
         K_test_A = np.zeros((Zdati.shape[1], ZAtest.shape[1]))
         K_test_B = np.zeros((Zdati.shape[1], ZBtest.shape[1]))

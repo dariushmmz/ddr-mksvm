@@ -153,6 +153,10 @@ def unit_of_work_ddr_multiclass(DATA, dataset_name="iris", dnn_on=True, mkl_on=T
             Zdati = f(torch.tensor(dati, dtype=torch.float32).T).T.numpy() if dnn_on else dati
             ZXtest = f(torch.tensor(Xtest, dtype=torch.float32).T).T.numpy() if dnn_on else Xtest
 
+        # Use the same double-precision kernel accumulation as training.
+        Zdati = np.asarray(Zdati, dtype=np.float64)
+        ZXtest = np.asarray(ZXtest, dtype=np.float64)
+
         eta = trainer._eta_numpy()
         K_test_all = np.zeros((Zdati.shape[1], ZXtest.shape[1]))
         for w, spec in zip(eta, base_kernel_specs):
