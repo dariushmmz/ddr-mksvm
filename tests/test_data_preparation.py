@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from unit_of_work_deterministic_binary import _apply_transform, prepare_binary_data
+from archive.research_scripts.unit_of_work_deterministic_binary import _apply_transform, prepare_binary_data
 
 
 def test_binary_preparation_imputes_question_marks_nan_and_infinity():

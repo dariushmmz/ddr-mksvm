@@ -1,8 +1,4 @@
-numpy>=1.24,<2.0
-scipy>=1.10
-pandas>=1.5
-scikit-learn>=1.2
-joblib>=1.2
-cvxpy>=1.6.5,<1.7
-torch>=2.1
-pytest>=7.4
+# Local model-development and full regression-test environment.
+# Manuscript tooling is intentionally separate in requirements-paper.txt.
+# The active package does not depend on Modal or another orchestrator.
+-e .[dev,deep]

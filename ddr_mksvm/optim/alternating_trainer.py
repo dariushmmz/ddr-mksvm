@@ -66,6 +66,9 @@ def _numpy_gram(spec, Z):
     genuinely indefinite kernel.  Casting before the reduction preserves the
     mathematically PSD kernel without changing the learned features.
     """
+    cached_train_gram = spec.get("_cached_train_gram")
+    if cached_train_gram is not None:
+        return cached_train_gram
     Z = np.asarray(Z, dtype=np.float64)
     if spec["kind"] == "linear":
         return Z.T @ Z
@@ -78,6 +81,17 @@ def _numpy_gram(spec, Z):
     raise ValueError(f"unknown kernel kind: {spec['kind']}")
 
 
+def _numpy_cross(spec, Z, Zq):
+    if spec["kind"] == "linear":
+        return Z.T @ Zq
+    if spec["kind"] == "poly":
+        return (Z.T @ Zq + spec["c"]) ** spec["degree"]
+    if spec["kind"] == "rbf":
+        diff = Z[:, :, None] - Zq[:, None, :]
+        return np.exp(-np.sum(diff ** 2, axis=0) / (2 * spec["alpha"] ** 2))
+    raise ValueError(f"unknown kernel kind: {spec['kind']}")
+
+
 class AlternatingTrainer:
     """
     X_np passed to fit() must be (n, m) -- features as COLUMNS, matching
@@ -86,7 +100,10 @@ class AlternatingTrainer:
 
     def __init__(self, base_kernel_specs, in_dim, dnn_on=True, mkl_on=True,
                  dro_on=True, epsilon=0.001, nu_grid=None, out_dim=None,
-                 n_outer=6, n_inner=15, lr=1e-2, seed=0):
+                 n_outer=6, n_inner=15, lr=1e-2, seed=0,
+                 raw_anchor_spec=None, residual_gate_init=0.10,
+                 residual_gate_regularization=0.05,
+                 convex_train_fn=train_with_nu_search):
         if not _TORCH_AVAILABLE:
             raise ImportError("torch is required for AlternatingTrainer.")
 
@@ -98,14 +115,26 @@ class AlternatingTrainer:
         self.nu_grid = nu_grid if nu_grid is not None else np.logspace(-6, 0, 7)
         self.n_outer = n_outer
         self.n_inner = n_inner
+        self.raw_anchor_spec = raw_anchor_spec
+        self.residual_gate_regularization = float(residual_gate_regularization)
+        self._convex_train_fn = convex_train_fn
 
         torch.manual_seed(seed)
         self.f_theta = DeepFeatureExtractor(in_dim, out_dim=out_dim) if dnn_on else IdentityFeatureExtractor()
         self.mixture = KernelMixture(len(base_kernel_specs)) if _TORCH_AVAILABLE else None
+        if raw_anchor_spec is not None:
+            if not dnn_on or self.mkl_on:
+                raise ValueError("the residual architecture requires DNN on and one deep kernel")
+            p = float(np.clip(residual_gate_init, 1e-5, 1 - 1e-5))
+            self.raw_gate_logit = torch.nn.Parameter(torch.tensor(np.log(p / (1 - p)), dtype=torch.float32))
+        else:
+            self.raw_gate_logit = None
 
         params = list(self.f_theta.parameters()) if dnn_on else []
         if self.mkl_on:
             params += list(self.mixture.parameters())
+        if self.raw_gate_logit is not None:
+            params.append(self.raw_gate_logit)
         self.optimizer = torch.optim.Adam(params, lr=lr) if params else None
 
         self.history = []
@@ -122,7 +151,17 @@ class AlternatingTrainer:
         L_f = network_lipschitz_bound(self.f_theta) if self.dnn_on else 1.0
         Lphi_list = _kernel_lipschitz_bounds(self.base_kernel_specs)
         eta = self._eta_numpy()
-        return composite_lipschitz_bound(L_f, Lphi_list, eta)
+        deep_L = composite_lipschitz_bound(L_f, Lphi_list, eta)
+        if self.raw_anchor_spec is None:
+            return deep_L
+        gate = self.residual_gate()
+        raw_L = float(self.raw_anchor_spec["_lip_bound"])
+        return float(np.sqrt((1.0 - gate) * raw_L ** 2 + gate * deep_L ** 2))
+
+    def residual_gate(self):
+        if self.raw_gate_logit is None:
+            return None
+        return float(torch.sigmoid(self.raw_gate_logit.detach()).item())
 
     def _combined_gram_numpy(self, X_np):
         with torch.no_grad():
@@ -132,7 +171,27 @@ class AlternatingTrainer:
         grams = [_numpy_gram(spec, Z_np) for spec in self.base_kernel_specs]
         eta = self._eta_numpy()
         K = sum(w * G for w, G in zip(eta, grams))
+        if self.raw_anchor_spec is not None:
+            raw = _numpy_gram(self.raw_anchor_spec, X_np)
+            gate = self.residual_gate()
+            K = (1.0 - gate) * raw + gate * K
         return K
+
+    def combined_cross_numpy(self, X_train, X_query):
+        """Training/query kernel used by inference, including the raw anchor."""
+        with torch.no_grad():
+            xt = torch.tensor(X_train, dtype=torch.float32)
+            xq = torch.tensor(X_query, dtype=torch.float32)
+            zt = self.f_theta(xt.T).T.numpy() if self.dnn_on else X_train
+            zq = self.f_theta(xq.T).T.numpy() if self.dnn_on else X_query
+        zt, zq = np.asarray(zt, float), np.asarray(zq, float)
+        grams = [_numpy_cross(spec, zt, zq) for spec in self.base_kernel_specs]
+        deep = sum(w * G for w, G in zip(self._eta_numpy(), grams))
+        if self.raw_anchor_spec is None:
+            return deep
+        gate = self.residual_gate()
+        raw = _numpy_cross(self.raw_anchor_spec, np.asarray(X_train, float), np.asarray(X_query, float))
+        return (1.0 - gate) * raw + gate * deep
 
     def _run_collapse_check(self, X_np):
         """
@@ -173,6 +232,7 @@ class AlternatingTrainer:
             raise ValueError("X and y must be finite")
         if set(np.unique(y)) != {-1.0, 1.0}:
             raise ValueError(f"binary labels must be -1/+1; got {np.unique(y)}")
+        self._prepare_raw_anchor(X_np)
         best = None
         previous_error = None
 
@@ -183,7 +243,7 @@ class AlternatingTrainer:
             theta_before = torch.cat([p.detach().reshape(-1) for p in self.f_theta.parameters()]) if self.dnn_on else torch.zeros(1)
             eta_before = self._eta_numpy().copy()
 
-            best = train_with_nu_search(K, y, self.nu_grid, epsilon=self.epsilon, L_theta_eta=L_theta_eta)
+            best = self._convex_train_fn(K, y, self.nu_grid, epsilon=self.epsilon, L_theta_eta=L_theta_eta)
             if best is None:
                 raise RuntimeError(f"convex subproblem failed to solve at outer iter {outer} for every nu")
 
@@ -200,6 +260,12 @@ class AlternatingTrainer:
                     grams = [_torch_gram(spec, Z) for spec in self.base_kernel_specs]
                     eta = self.mixture.eta() if self.mkl_on else torch.tensor(self._eta_numpy(), dtype=torch.float32)
                     K_t = sum(w * G for w, G in zip(eta, grams))
+                    gate_penalty = 0.0
+                    if self.raw_anchor_spec is not None:
+                        raw_K = torch.tensor(_numpy_gram(self.raw_anchor_spec, X_np), dtype=torch.float32)
+                        gate_t = torch.sigmoid(self.raw_gate_logit)
+                        K_t = (1.0 - gate_t) * raw_K + gate_t * K_t
+                        gate_penalty = self.residual_gate_regularization * gate_t ** 2
                     M_t = torch.outer(y_t, y_t) * K_t
                     scores = M_t @ u_t - y_t * gamma_t
                     hinge = torch.clamp(1 - scores, min=0).mean()
@@ -209,10 +275,13 @@ class AlternatingTrainer:
                         Lphi = torch.tensor(_kernel_lipschitz_bounds(self.base_kernel_specs), dtype=torch.float32)
                         L_theta_eta_t = L_f * torch.sqrt(torch.clamp((eta * Lphi ** 2).sum(), min=1e-12))
                         w_norm = torch.sqrt(torch.clamp(u_t @ (M_t @ u_t), min=1e-12))
-                        loss = hinge + self.epsilon * L_theta_eta_t * w_norm + best["selected_nu"] * w_norm ** 2
+                        if self.raw_anchor_spec is not None:
+                            raw_L = torch.tensor(self.raw_anchor_spec["_lip_bound"], dtype=torch.float32)
+                            L_theta_eta_t = torch.sqrt((1.0 - gate_t) * raw_L ** 2 + gate_t * L_theta_eta_t ** 2)
+                        loss = hinge + self.epsilon * L_theta_eta_t * w_norm + best["selected_nu"] * w_norm ** 2 + gate_penalty
                     else:
                         w_norm_sq = torch.clamp(u_t @ (M_t @ u_t), min=0.0)
-                        loss = hinge + best["selected_nu"] * w_norm_sq
+                        loss = hinge + best["selected_nu"] * w_norm_sq + gate_penalty
 
                     loss.backward()
                     self.optimizer.step()
@@ -227,7 +296,8 @@ class AlternatingTrainer:
                 theta_delta_norm=float(torch.linalg.vector_norm(theta_after-theta_before)),
                 eta_delta_norm=float(np.linalg.norm(eta_after-eta_before)),
                 feature_matrix_delta_norm=float(np.linalg.norm(K_after-K)),
-                svm_u_norm=d["w_norm_H"], sum_xi=d["sum_xi"], score_std=d["score_std"]))
+                svm_u_norm=d["w_norm_H"], sum_xi=d["sum_xi"], score_std=d["score_std"],
+                residual_gate=self.residual_gate()))
             previous_error = best["training_error"]
             print(f"  [OUTER {outer}] error={best['training_error']:.6f} delta={self.history[-1]['delta_training_error']} "
                   f"L={L_theta_eta:.6g} theta_delta={self.history[-1]['theta_delta_norm']:.6g} "
@@ -239,7 +309,7 @@ class AlternatingTrainer:
         # outer iteration (spec Section 6.5)
         final_K = self._combined_gram_numpy(X_np)
         final_L = self._current_L_theta_eta() if self.dro_on else 0.0
-        final_best = train_with_nu_search(final_K, y, self.nu_grid, epsilon=self.epsilon, L_theta_eta=final_L)
+        final_best = self._convex_train_fn(final_K, y, self.nu_grid, epsilon=self.epsilon, L_theta_eta=final_L)
         if final_best is None:
             final_best = best  # fall back to the last successful outer-iter solution
 
@@ -266,6 +336,8 @@ class AlternatingTrainer:
         """
         import numpy as np
         y_label = np.asarray(y_label, dtype=int)
+        X_np = np.asarray(X_np, dtype=float)
+        self._prepare_raw_anchor(X_np)
         y_hats = [np.where(y_label == l, 1.0, -1.0) for l in range(1, L + 1)]
 
         solutions = None
@@ -276,7 +348,7 @@ class AlternatingTrainer:
 
             solutions = []
             for y_hat in y_hats:
-                sol = train_with_nu_search(K, y_hat, self.nu_grid, epsilon=self.epsilon, L_theta_eta=L_theta_eta)
+                sol = self._convex_train_fn(K, y_hat, self.nu_grid, epsilon=self.epsilon, L_theta_eta=L_theta_eta)
                 if sol is None:
                     raise RuntimeError(f"convex subproblem failed at outer iter {outer} for one one-vs-all class")
                 solutions.append(sol)
@@ -299,6 +371,12 @@ class AlternatingTrainer:
                     grams = [_torch_gram(spec, Z) for spec in self.base_kernel_specs]
                     eta = self.mixture.eta() if self.mkl_on else torch.tensor(self._eta_numpy(), dtype=torch.float32)
                     K_t = sum(w * G for w, G in zip(eta, grams))
+                    gate_penalty = 0.0
+                    if self.raw_anchor_spec is not None:
+                        raw_K = torch.tensor(_numpy_gram(self.raw_anchor_spec, X_np), dtype=torch.float32)
+                        gate_t = torch.sigmoid(self.raw_gate_logit)
+                        K_t = (1.0 - gate_t) * raw_K + gate_t * K_t
+                        gate_penalty = self.residual_gate_regularization * gate_t ** 2
 
                     total_hinge = 0.0
                     for u_t, gamma_t, y_hat_t in zip(u_list, gamma_list, y_hat_t_list):
@@ -323,9 +401,12 @@ class AlternatingTrainer:
                             M_t = torch.outer(y_hat_t, y_hat_t) * K_t
                             total_wnorm = total_wnorm + torch.sqrt(torch.clamp(u_t @ (M_t @ u_t), min=1e-12))
                         total_wnorm = total_wnorm / L
-                        loss = total_hinge + self.epsilon * L_theta_eta_t * total_wnorm + total_regularization
+                        if self.raw_anchor_spec is not None:
+                            raw_L = torch.tensor(self.raw_anchor_spec["_lip_bound"], dtype=torch.float32)
+                            L_theta_eta_t = torch.sqrt((1.0 - gate_t) * raw_L ** 2 + gate_t * L_theta_eta_t ** 2)
+                        loss = total_hinge + self.epsilon * L_theta_eta_t * total_wnorm + total_regularization + gate_penalty
                     else:
-                        loss = total_hinge + total_regularization
+                        loss = total_hinge + total_regularization + gate_penalty
 
                     loss.backward()
                     self.optimizer.step()
@@ -335,7 +416,7 @@ class AlternatingTrainer:
         final_L = self._current_L_theta_eta() if self.dro_on else 0.0
         final_solutions = []
         for l_idx, y_hat in enumerate(y_hats):
-            sol = train_with_nu_search(final_K, y_hat, self.nu_grid, epsilon=self.epsilon, L_theta_eta=final_L)
+            sol = self._convex_train_fn(final_K, y_hat, self.nu_grid, epsilon=self.epsilon, L_theta_eta=final_L)
             final_solutions.append(sol if sol is not None else solutions[l_idx])
 
         self.final_solutions = final_solutions
@@ -343,3 +424,11 @@ class AlternatingTrainer:
         self.final_L_theta_eta = final_L
         self._run_collapse_check(X_np)
         return self
+
+    def _prepare_raw_anchor(self, X_np):
+        if self.raw_anchor_spec is None or "_lip_bound" in self.raw_anchor_spec:
+            return
+        from ddr_mksvm.kernels.base_kernels import build_kernel
+        kernel = build_kernel({k: v for k, v in self.raw_anchor_spec.items() if not k.startswith("_")})
+        kernel.fit(X_np)
+        self.raw_anchor_spec["_lip_bound"] = kernel.lipschitz_bound()

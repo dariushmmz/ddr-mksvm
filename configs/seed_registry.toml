@@ -1,0 +1,53 @@
+[deterministic.rkhs_gate8]
+seeds = "7000-7007"
+status = "consumed"
+
+[deterministic.rkhs_confirmation]
+seeds = "8000-8095"
+status = "consumed"
+
+[deterministic.class_sensitive_gate8]
+seeds = "9000-9007"
+status = "consumed"
+
+[deterministic.sqrt_error_targeted_gate8]
+seeds = "9000-9007"
+status = "consumed-retrospective-ablation"
+reuses = "original class-sensitive Gate8 splits and immutable sqrt inner-validation banks"
+run = "results/v8/gate8/v8-sqrt-error-gate8-20261005-v1"
+
+[deterministic.class_sensitive_confirmation]
+seeds = "10000-10095"
+status = "consumed"
+
+[expanded.smoke]
+seeds = "16000"
+status = "consumed"
+
+[expanded.gate8]
+seeds = "16100-16107"
+status = "consumed"
+
+[expanded.gate24]
+seeds = "16200-16223"
+status = "consumed"
+
+[expanded.confirmation]
+seeds = "16300-16395"
+status = "consumed"
+
+[robust.development]
+seeds = "15000-15023"
+status = "exposed-development"
+
+[robust.bounded_rbf_gate8]
+seeds = "15300-15307"
+status = "consumed-negative-gate"
+
+[robust.reserved_gate24]
+seeds = "15400-15423"
+status = "untouched-reserved-do-not-run"
+
+[robust.reserved_confirmation]
+seeds = "14000-14095"
+status = "untouched-reserved-do-not-run"

@@ -20,12 +20,12 @@ import pytest
 cp = pytest.importorskip("cvxpy")
 import numpy as np
 
-from unit_of_work_deterministic_binary import (
+from archive.research_scripts.unit_of_work_deterministic_binary import (
     DATASET_CONFIG as BINARY_CONFIG,
     _parse_kernel as _parse_kernel_binary,
     _compute_kernel as _compute_kernel_binary,
 )
-from unit_of_work_deterministic_multiclass import (
+from archive.research_scripts.unit_of_work_deterministic_multiclass import (
     DATASET_CONFIG as MULTICLASS_CONFIG,
     _parse_kernel as _parse_kernel_multiclass,
     _compute_kernel as _compute_kernel_multiclass,

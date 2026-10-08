@@ -8,7 +8,7 @@ from ddr_mksvm.checkpointing import (
     run_and_checkpoint,
     save_run_checkpoint,
 )
-from main_ddr_binary import ABLATIONS, load_ablation_from_checkpoints
+from archive.research_scripts.main_ddr_binary import ABLATIONS, load_ablation_from_checkpoints
 
 
 def _fake_work(data, seed, offset):

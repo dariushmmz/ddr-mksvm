@@ -27,7 +27,48 @@ dist/
 
 # Generated experiment outputs and resume checkpoints
 results/
-docs/
+
+# Local backups and notebook workspaces
+*.zip
+notebooks/
+
+# Keep the public documentation set focused on final technical material.
+docs/**
+!docs/ARCHITECTURE_HISTORY.md
+!docs/PROJECT_SETUP_AND_EXECUTION.md
+!docs/REPOSITORY_MIGRATION.md
+!docs/REPOSITORY_REFACTOR_REPORT.md
+!docs/V7_CROSS_DATASET_REPORT.md
+!docs/V8_CROSS_DATASET_REPORT.md
+!docs/V8_1_CROSS_DATASET_REPORT.md
+!docs/expanded_dataset_study/
+!docs/expanded_dataset_study/**
+!docs/robust/
+docs/robust/**
+!docs/robust/README.md
+!docs/robust/ROBUST_RESEARCH_FINAL_REPORT.md
+!docs/specifications/
+!docs/specifications/DDR-MKSVM_SPECIFICATION.md
+
+# Ignore intermediate manuscript builds while retaining selected final outputs.
+paper/final_manuscript/.*
+paper/final_manuscript/*.qa.txt
+paper/final_manuscript/qa_*.png
+paper/final_manuscript/20*/
+paper/final_manuscript/*.docx
+paper/final_manuscript/*.pdf
+!paper/final_manuscript/SVM_FINAL_PAPER_REVISED_3.pdf
+paper/final_manuscript/SVM_FINAL_PAPER*.md
+!paper/final_manuscript/SVM_FINAL_PAPER_REVISED_3.md
+paper/final_manuscript/*CHANGELOG*
+paper/final_manuscript/*.svg
+paper/final_manuscript/figures/*.svg
+paper/final_manuscript/figures/fig1_v7_error_deltas.png
+paper/final_manuscript/figures/fig2_v8c_tradeoff.png
+paper/final_manuscript/figures/fig4_r9_gate8_deltas.png
+paper/final_manuscript/figures/fig5_r10_mechanism.png
+paper/final_manuscript/build_manuscript_outputs.py
+paper/final_manuscript/validate_manuscript.py
 
 # IDE/editor settings
 .idea/

@@ -1,0 +1,2 @@
+# Optional journal-manuscript rendering and validation tools.
+-e .[paper]

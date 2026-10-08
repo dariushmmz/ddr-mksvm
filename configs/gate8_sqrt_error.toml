@@ -1,0 +1,24 @@
+[experiment]
+id = "v8-sqrt-error-gate8-20261005-v1"
+stage = "gate8"
+purpose = "requested square-root weighting with error-based inner selection ablation"
+datasets = ["blood_transfusion", "mammographicmass_binary", "heart_disease", "parkinson", "wine"]
+seeds = [9000, 9001, 9002, 9003, 9004, 9005, 9006, 9007]
+candidate = "sqrt_error"
+weighting = "mean-one square-root inverse-frequency within each OVO pair"
+selection_metric = "mean validation error"
+reference_models = ["v7", "v8_c"]
+
+[protocol]
+outer_split = "sorted stratified 75/25 holdout"
+inner_split = "3-fold stratified; random_state = 20000 + outer seed"
+alpha_rules = ["paper", "med:-2", "med:-1", "med:-0.5", "med:0", "med:0.5", "med:1", "med:2"]
+C_grid = [0.1, 1.0, 10.0, 100.0]
+reuse = "immutable sqrt inner-validation banks from results/v8/gate8/v8-gate8-20260909"
+compute = "Modal CPU only; four workers; no GPU"
+
+[reporting]
+metrics = ["test_error", "balanced_accuracy", "macro_f1"]
+interval = "nominal/descriptive 95% paired split-variation interval"
+interval_caveat = "Repeated holdout splits overlap and are dependent; the interval is not a formal independent-sample confidence interval."
+
